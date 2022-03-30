@@ -119,6 +119,18 @@ export const select = defaultRegistry.select;
 export const resolveSelect = defaultRegistry.resolveSelect;
 
 /**
+ * Given the name of a registered store, returns an object containing the store's
+ * selectors pre-bound to state so that you only need to supply additional arguments,
+ * and modified so that they throw promises in case the selector is not resolved yet.
+ *
+ * @param {string|StoreDescriptor} storeNameOrDescriptor Unique namespace identifier for the store
+ *                                                       or the store descriptor.
+ *
+ * @return {Object} Object containing the store's suspense-wrapped selectors.
+ */
+export const suspendSelect = defaultRegistry.suspendSelect;
+
+/**
  * Given the name of a registered store, returns an object of the store's action creators.
  * Calling an action creator will cause it to be dispatched, updating the state value accordingly.
  *

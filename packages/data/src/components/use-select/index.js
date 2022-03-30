@@ -315,25 +315,7 @@ export default function useSelect( mapSelect, deps ) {
  * @return {Function}  A custom react hook.
  */
 export function useSuspenseSelect( mapSelect, deps ) {
-	const hasMappingFunction = 'function' === typeof mapSelect;
-
-	// If we're recalling a store by its name or by
-	// its descriptor then we won't be caching the
-	// calls to `mapSelect` because we won't be calling it.
-	if ( ! hasMappingFunction ) {
-		deps = [];
-	}
-
-	// Because of the "rule of hooks" we have to call `useCallback`
-	// on every invocation whether or not we have a real function
-	// for `mapSelect`. we'll create this intermediate variable to
-	// fulfill that need and then reference it with our "real"
-	// `_mapSelect` if we can.
-	const callbackMapper = useCallback(
-		hasMappingFunction ? mapSelect : noop,
-		deps
-	);
-	const _mapSelect = hasMappingFunction ? callbackMapper : null;
+	const _mapSelect = useCallback( mapSelect, deps );
 
 	const registry = useRegistry();
 	const isAsync = useAsyncMode();
@@ -348,65 +330,34 @@ export function useSuspenseSelect( mapSelect, deps ) {
 	const latestMapOutput = useRef();
 	const latestMapOutputError = useRef();
 	const isMountedAndNotUnsubscribing = useRef();
-	const shouldBeSuspended = useRef( false );
 
-	// Keep track of the stores being selected in the _mapSelect function,
+	// Keep track of the stores being selected in the `mapSelect` function,
 	// and only subscribe to those stores later.
 	const listeningStores = useRef( [] );
 	const trapSelect = useCallback(
 		( callback ) =>
 			registry.__experimentalMarkListeningStores(
-				callback,
-				listeningStores,
-				shouldBeSuspended
+				() => callback( registry.suspendSelect, registry ),
+				listeningStores
 			),
 		[ registry ]
 	);
 
-	// Generate a "flag" for used in the effect dependency array.
-	// It's different than just using `mapSelect` since deps could be undefined,
-	// in that case, we would still want to memoize it.
-	const depsChangedFlag = useMemo( () => ( {} ), deps || [] );
+	let mapOutput = latestMapOutput.current;
+	let mapOutputError = latestMapOutputError.current;
 
-	let mapOutput;
-
-	if ( _mapSelect ) {
-		mapOutput = latestMapOutput.current;
-		const hasReplacedMapSelect = latestMapSelect.current !== _mapSelect;
-		const lastMapSelectFailed = !! latestMapOutputError.current;
-
-		if ( hasReplacedMapSelect || lastMapSelectFailed ) {
-			try {
-				mapOutput = trapSelect( () =>
-					_mapSelect( registry.select, registry )
-				);
-			} catch ( error ) {
-				let errorMessage = `An error occurred while running 'mapSelect': ${ error.message }`;
-
-				if ( latestMapOutputError.current ) {
-					errorMessage += `\nThe error may be correlated with this previous error:\n`;
-					errorMessage += `${ latestMapOutputError.current.stack }\n\n`;
-					errorMessage += 'Original stack trace:';
-				}
-
-				// eslint-disable-next-line no-console
-				console.error( errorMessage );
-			}
-
-			if ( shouldBeSuspended.current ) {
-				throw shouldBeSuspended.current;
-			}
+	if ( latestMapSelect.current !== _mapSelect ) {
+		try {
+			mapOutput = trapSelect( _mapSelect );
+		} catch ( error ) {
+			mapOutputError = error;
 		}
 	}
 
 	useIsomorphicLayoutEffect( () => {
-		if ( ! hasMappingFunction ) {
-			return;
-		}
-
 		latestMapSelect.current = _mapSelect;
 		latestMapOutput.current = mapOutput;
-		latestMapOutputError.current = undefined;
+		latestMapOutputError.current = mapOutputError;
 		isMountedAndNotUnsubscribing.current = true;
 
 		// This has to run after the other ref updates
@@ -419,42 +370,31 @@ export function useSuspenseSelect( mapSelect, deps ) {
 		}
 	} );
 
+	// Generate a "flag" for used in the effect dependency array.
+	// It's different than just using `mapSelect` since deps could be undefined,
+	// in that case, we would still want to memoize it.
+	const depsChangedFlag = useMemo( () => ( {} ), deps || [] );
+
 	useIsomorphicLayoutEffect( () => {
-		if ( ! hasMappingFunction ) {
-			return;
-		}
-
 		const onStoreChange = () => {
-			if ( isMountedAndNotUnsubscribing.current ) {
-				try {
-					const newMapOutput = trapSelect( () =>
-						latestMapSelect.current( registry.select, registry )
-					);
-
-					if (
-						isShallowEqual( latestMapOutput.current, newMapOutput )
-					) {
-						return;
-					}
-					latestMapOutput.current = newMapOutput;
-				} catch ( error ) {
-					latestMapOutputError.current = error;
-				}
-
-				if ( shouldBeSuspended.current ) {
-					throw shouldBeSuspended.current;
-				}
-				forceRender();
+			if ( ! isMountedAndNotUnsubscribing.current ) {
+				return;
 			}
-		};
 
-		// catch any possible state changes during mount before the subscription
-		// could be set.
-		if ( latestIsAsync.current ) {
-			renderQueue.add( queueContext, onStoreChange );
-		} else {
-			onStoreChange();
-		}
+			try {
+				const newMapOutput = trapSelect( latestMapSelect.current );
+
+				if ( isShallowEqual( latestMapOutput.current, newMapOutput ) ) {
+					return;
+				}
+
+				latestMapOutput.current = newMapOutput;
+			} catch ( error ) {
+				latestMapOutputError.current = error;
+			}
+
+			forceRender();
+		};
 
 		const onChange = () => {
 			if ( latestIsAsync.current ) {
@@ -463,6 +403,10 @@ export function useSuspenseSelect( mapSelect, deps ) {
 				onStoreChange();
 			}
 		};
+
+		// catch any possible state changes during mount before the subscription
+		// could be set.
+		onChange();
 
 		const unsubscribers = listeningStores.current.map( ( storeName ) =>
 			registry.__experimentalSubscribeStore( storeName, onChange )
@@ -474,10 +418,11 @@ export function useSuspenseSelect( mapSelect, deps ) {
 			unsubscribers.forEach( ( unsubscribe ) => unsubscribe?.() );
 			renderQueue.flush( queueContext );
 		};
-		// If you're tempted to eliminate the spread dependencies below don't do it!
-		// We're passing these in from the calling function and want to make sure we're
-		// examining every individual value inside the `deps` array.
-	}, [ registry, trapSelect, hasMappingFunction, depsChangedFlag ] );
+	}, [ registry, trapSelect, depsChangedFlag ] );
 
-	return hasMappingFunction ? mapOutput : registry.select( mapSelect );
+	if ( mapOutputError ) {
+		throw mapOutputError;
+	}
+
+	return mapOutput;
 }

@@ -56,7 +56,6 @@ export function createRegistry( storeConfigs = {}, parent = null ) {
 	const stores = {};
 	const emitter = createEmitter();
 	const __experimentalListeningStores = new Set();
-	let __pendingSuspendedPromises = [];
 
 	/**
 	 * Global listener called for each store's update.
@@ -94,31 +93,18 @@ export function createRegistry( storeConfigs = {}, parent = null ) {
 			return store.getSelectors();
 		}
 
-		const ret = parent && parent.select( storeName );
-		__pendingSuspendedPromises = __pendingSuspendedPromises.concat(
-			parent.__unstableGetPendingSuspendedPromises()
-		);
-
-		return ret;
+		return parent?.select( storeName );
 	}
 
-	function __experimentalMarkListeningStores(
-		callback,
-		listeningStoresRef,
-		shouldBeSuspendedRef
-	) {
+	function __experimentalMarkListeningStores( callback, listeningStoresRef ) {
 		__experimentalListeningStores.clear();
-		__pendingSuspendedPromises = [];
-		const result = callback.call( this );
-		listeningStoresRef.current = Array.from(
-			__experimentalListeningStores
-		);
-		if ( shouldBeSuspendedRef ) {
-			shouldBeSuspendedRef.current = __pendingSuspendedPromises.length
-				? Promise.all( __pendingSuspendedPromises )
-				: false;
+		try {
+			return callback.call( this );
+		} finally {
+			listeningStoresRef.current = Array.from(
+				__experimentalListeningStores
+			);
 		}
-		return result;
 	}
 
 	/**
@@ -143,6 +129,29 @@ export function createRegistry( storeConfigs = {}, parent = null ) {
 		}
 
 		return parent && parent.resolveSelect( storeName );
+	}
+
+	/**
+	 * Given the name of a registered store, returns an object containing the store's
+	 * selectors pre-bound to state so that you only need to supply additional arguments,
+	 * and modified so that they throw promises in case the selector is not resolved yet.
+	 *
+	 * @param {string|StoreDescriptor} storeNameOrDescriptor Unique namespace identifier for the store
+	 *                                                       or the store descriptor.
+	 *
+	 * @return {Object} Object containing the store's suspense-wrapped selectors.
+	 */
+	function suspendSelect( storeNameOrDescriptor ) {
+		const storeName = isObject( storeNameOrDescriptor )
+			? storeNameOrDescriptor.name
+			: storeNameOrDescriptor;
+		__experimentalListeningStores.add( storeName );
+		const store = stores[ storeName ];
+		if ( store ) {
+			return store.getSuspendSelectors();
+		}
+
+		return parent && parent.suspendSelect( storeName );
 	}
 
 	/**
@@ -294,6 +303,7 @@ export function createRegistry( storeConfigs = {}, parent = null ) {
 		subscribe,
 		select,
 		resolveSelect,
+		suspendSelect,
 		dispatch,
 		use,
 		register,
@@ -301,9 +311,6 @@ export function createRegistry( storeConfigs = {}, parent = null ) {
 		registerStore,
 		__experimentalMarkListeningStores,
 		__experimentalSubscribeStore,
-		__unstableSuspend: ( promise ) =>
-			__pendingSuspendedPromises.push( promise ),
-		__unstableGetShouldBeSuspended: () => __pendingSuspendedPromises,
 	};
 
 	//

@@ -155,19 +155,19 @@ export default function createReduxStore( key, options ) {
 					options.resolvers,
 					selectors,
 					store,
-					resolversCache,
-					registry,
-					key
+					resolversCache
 				);
 				resolvers = result.resolvers;
 				selectors = result.selectors;
 			}
 
 			const resolveSelectors = mapResolveSelectors( selectors, store );
+			const suspendSelectors = mapSuspendSelectors( selectors, store );
 
 			const getSelectors = () => selectors;
 			const getActions = () => actions;
 			const getResolveSelectors = () => resolveSelectors;
+			const getSuspendSelectors = () => suspendSelectors;
 
 			// We have some modules monkey-patching the store object
 			// It's wrong to do so but until we refactor all of our effects to controls
@@ -202,6 +202,7 @@ export default function createReduxStore( key, options ) {
 				resolvers,
 				getSelectors,
 				getResolveSelectors,
+				getSuspendSelectors,
 				getActions,
 				subscribe,
 			};
@@ -314,6 +315,14 @@ function mapActions( actions, store ) {
 	return mapValues( actions, createBoundAction );
 }
 
+const META_SELECTORS = [
+	'getIsResolving',
+	'hasStartedResolution',
+	'hasFinishedResolution',
+	'isResolving',
+	'getCachedResolvers',
+];
+
 /**
  * Maps selectors to functions that return a resolution promise for them
  *
@@ -324,13 +333,7 @@ function mapActions( actions, store ) {
  */
 function mapResolveSelectors( selectors, store ) {
 	return mapValues(
-		omit( selectors, [
-			'getIsResolving',
-			'hasStartedResolution',
-			'hasFinishedResolution',
-			'isResolving',
-			'getCachedResolvers',
-		] ),
+		omit( selectors, META_SELECTORS ),
 		( selector, selectorName ) => ( ...args ) =>
 			new Promise( ( resolve, reject ) => {
 				const hasFinished = () =>
@@ -367,26 +370,54 @@ function mapResolveSelectors( selectors, store ) {
 	);
 }
 
+function mapSuspendSelectors( selectors, store ) {
+	return mapValues(
+		omit( selectors, META_SELECTORS ),
+		( selector, selectorName ) => ( ...args ) => {
+			const getResult = () => selector.apply( null, args );
+			const hasFinished = () =>
+				selectors.hasFinishedResolution( selectorName, args );
+
+			const result = getResult();
+
+			if ( hasFinished() ) {
+				return result;
+			}
+
+			throw new Promise( ( resolve, reject ) => {
+				const unsubscribe = store.subscribe( () => {
+					if ( hasFinished() ) {
+						unsubscribe();
+						if (
+							selectors.hasResolutionFailed( selectorName, args )
+						) {
+							reject(
+								selectors.getResolutionError(
+									selectorName,
+									args
+								)
+							);
+						} else {
+							resolve( getResult() );
+						}
+					}
+				} );
+			} );
+		}
+	);
+}
+
 /**
  * Returns resolvers with matched selectors for a given namespace.
  * Resolvers are side effects invoked once per argument set of a given selector call,
  * used in ensuring that the data needs for the selector are satisfied.
  *
- * @param {Object}       resolvers      Resolvers to register.
- * @param {Object}       selectors      The current selectors to be modified.
- * @param {Object}       store          The redux store to which the resolvers should be mapped.
- * @param {Object}       resolversCache Resolvers Cache.
- * @param {DataRegistry} registry       Registry reference.
- * @param {string}       storeName      Store name.
+ * @param {Object} resolvers      Resolvers to register.
+ * @param {Object} selectors      The current selectors to be modified.
+ * @param {Object} store          The redux store to which the resolvers should be mapped.
+ * @param {Object} resolversCache Resolvers Cache.
  */
-function mapResolvers(
-	resolvers,
-	selectors,
-	store,
-	resolversCache,
-	registry,
-	storeName
-) {
+function mapResolvers( resolvers, selectors, store, resolversCache ) {
 	// The `resolver` can be either a function that does the resolution, or, in more advanced
 	// cases, an object with a `fullfill` method and other optional methods like `isFulfilled`.
 	// Here we normalize the `resolver` function to an object with `fulfill` method.
@@ -410,38 +441,17 @@ function mapResolvers(
 
 		const selectorResolver = ( ...args ) => {
 			async function fulfillSelector() {
-				if ( resolversCache.isRunning( selectorName, args ) ) {
-					registry.__unstableSuspend(
-						registry.resolveSelect(
-							storeName,
-							selectorName,
-							...args
-						)
-					);
-					return;
-				}
-
 				const state = store.getState();
+
 				if (
-					typeof resolver.isFulfilled === 'function' &&
-					resolver.isFulfilled( state, ...args )
+					resolversCache.isRunning( selectorName, args ) ||
+					( typeof resolver.isFulfilled === 'function' &&
+						resolver.isFulfilled( state, ...args ) )
 				) {
 					return;
 				}
 
 				const { metadata } = store.__unstableOriginalGetState();
-				if (
-					metadataSelectors.hasFinishedResolution(
-						metadata,
-						selectorName,
-						args
-					)
-				) {
-					return;
-				}
-				registry.__unstableSuspend(
-					registry.resolveSelect( storeName, selectorName, ...args )
-				);
 
 				if (
 					metadataSelectors.hasStartedResolution(

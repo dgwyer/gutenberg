@@ -662,6 +662,20 @@ _Parameters_
 
 -   _listener_ `Function`: Callback function.
 
+### suspendSelect
+
+Given the name of a registered store, returns an object containing the store's
+selectors pre-bound to state so that you only need to supply additional arguments,
+and modified so that they throw promises in case the selector is not resolved yet.
+
+_Parameters_
+
+-   _storeNameOrDescriptor_ `string|StoreDescriptor`: Unique namespace identifier for the store or the store descriptor.
+
+_Returns_
+
+-   `Object`: Object containing the store's suspense-wrapped selectors.
+
 ### use
 
 Extends a registry to inherit functionality provided by a given plugin. A
